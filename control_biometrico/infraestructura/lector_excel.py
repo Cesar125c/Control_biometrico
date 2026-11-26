@@ -11,6 +11,11 @@ from control_biometrico.dominio.modelos import Jornada
 from control_biometrico.dominio.nombres import clave
 
 
+# En el archivo fuente, el año 2030 es un error de captura; mes y día son válidos.
+ANIO_FUENTE_ERRONEO = 2030
+ANIO_CORRECTO = 2026
+
+
 class PeriodoSinRegistrosError(ValueError):
     def __init__(self, periodo, periodos_disponibles):
         self.periodo = periodo
@@ -55,28 +60,33 @@ def hora(valor):
 
 
 def fecha(valor):
+    def corregir_anio(fecha_valor):
+        if fecha_valor.year == ANIO_FUENTE_ERRONEO:
+            return fecha_valor.replace(year=ANIO_CORRECTO)
+        return fecha_valor
+
     if isinstance(valor, datetime):
-        return valor.date()
+        return corregir_anio(valor.date())
     if isinstance(valor, date):
-        return valor
+        return corregir_anio(valor)
     if isinstance(valor, (int, float)) and not isinstance(valor, bool):
         try:
             convertida = from_excel(valor)
             if isinstance(convertida, datetime):
-                return convertida.date()
+                return corregir_anio(convertida.date())
             if isinstance(convertida, date):
-                return convertida
+                return corregir_anio(convertida)
         except (OverflowError, TypeError, ValueError):
             return None
     if isinstance(valor, str):
         texto = valor.strip()
         try:
-            return datetime.fromisoformat(texto).date()
+            return corregir_anio(datetime.fromisoformat(texto).date())
         except ValueError:
             pass
         for formato in ("%d/%m/%Y", "%d-%m-%Y", "%Y-%m-%d", "%m/%d/%Y"):
             try:
-                return datetime.strptime(texto, formato).date()
+                return corregir_anio(datetime.strptime(texto, formato).date())
             except ValueError:
                 continue
     return None

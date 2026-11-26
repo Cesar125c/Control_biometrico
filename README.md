@@ -2,8 +2,8 @@
 
 La aplicación conserva el selector de archivos de Windows para elegir un libro
 Excel `.xlsx`, y solicita por consola el período del informe en formato
-`MM/AAAA`. Las fechas se usan tal como están guardadas en el archivo; no se
-ajustan para hacerlas coincidir con el período solicitado.
+`MM/AAAA`. En el archivo fuente actual, las fechas que tienen año 2030 se
+interpretan como 2026, conservando mes y día. El Excel original no se modifica.
 
 El libro de entrada debe conservar las hojas `BIOMETRICO` y `HORARIOS AE`.
 El lector busca los encabezados originales:
