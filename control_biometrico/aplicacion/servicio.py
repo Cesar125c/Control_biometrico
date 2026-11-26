@@ -10,14 +10,19 @@ from control_biometrico.dominio.nombres import clave
 def generar(jornadas):
     agrupado = {}
     for jornada in jornadas:
-        identidad = (clave(jornada.nombre), jornada.cedula)
+        identidad = (
+            ("cedula", jornada.cedula)
+            if jornada.cedula
+            else ("nombre", clave(jornada.nombre))
+        )
         if identidad not in agrupado:
             agrupado[identidad] = {
                 "cedula": jornada.cedula,
                 "nombre": jornada.nombre,
-                "dias_novedad": set(),
-                "marcaciones": [],
-                "observaciones": [],
+                "faltantes_marcacion": [],
+                "casos_revision": [],
+                "dias_con_timbres_faltantes": set(),
+                "revision_vista": set(),
                 "atrasos": [],
                 "atrasos_minutos": 0,
                 "salidas": [],
@@ -30,11 +35,29 @@ def generar(jornadas):
 
         faltantes = marcaciones.analizar(jornada)
         if faltantes:
-            fila["marcaciones"].extend(f"{dia}: {texto}" for texto in faltantes)
-            fila["dias_novedad"].add(jornada.fecha)
+            fila["faltantes_marcacion"].extend(
+                f"{dia}: {texto}" for texto in faltantes
+            )
+            fila["dias_con_timbres_faltantes"].add(jornada.fecha)
         if jornada.observacion:
-            fila["observaciones"].append(f"{dia}: {jornada.observacion}")
-            fila["dias_novedad"].add(jornada.fecha)
+            texto = (
+                jornada.observacion
+                if jornada.revision_sin_fecha
+                else f"{dia}: {jornada.observacion}"
+            )
+            if texto not in fila["revision_vista"]:
+                fila["casos_revision"].append(texto)
+                fila["revision_vista"].add(texto)
+        for etiqueta, texto_fuente in (
+            ("Observaciones", jornada.observacion_biometrica),
+            ("Justificación", jornada.justificacion_biometrica),
+        ):
+            texto_fuente = str(texto_fuente or "").strip()
+            if texto_fuente:
+                detalle = f"{dia}: {etiqueta} BIOMETRICO: {texto_fuente}"
+                if detalle not in fila["revision_vista"]:
+                    fila["casos_revision"].append(detalle)
+                    fila["revision_vista"].add(detalle)
 
         minutos = atrasos.analizar(jornada)
         if minutos:
@@ -60,11 +83,14 @@ def generar(jornadas):
             {
                 "cedula": fila["cedula"],
                 "nombre": fila["nombre"],
-                "dias_con_novedades": len(fila["dias_novedad"]),
-                "observaciones": fila["marcaciones"] + fila["observaciones"],
+                "dias_con_timbres_faltantes": len(
+                    fila["dias_con_timbres_faltantes"]
+                ),
+                "detalle_timbres_faltantes": fila["faltantes_marcacion"],
+                "casos_revision": fila["casos_revision"],
             }
             for fila in filas
-            if fila["marcaciones"] or fila["observaciones"]
+            if fila["faltantes_marcacion"] or fila["casos_revision"]
         ],
         "Atrasos": [
             {

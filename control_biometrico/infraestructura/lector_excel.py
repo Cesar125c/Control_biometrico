@@ -11,22 +11,32 @@ from control_biometrico.dominio.modelos import Jornada
 from control_biometrico.dominio.nombres import clave
 
 
-# En el archivo fuente, el año 2030 es un error de captura; mes y día son válidos.
-ANIO_FUENTE_ERRONEO = 2030
-ANIO_CORRECTO = 2026
+EQUIVALENCIAS_ANIO_BIOMETRICO = {2030: 2026}
 
 
 class PeriodoSinRegistrosError(ValueError):
     def __init__(self, periodo, periodos_disponibles):
         self.periodo = periodo
         self.periodos_disponibles = periodos_disponibles
-        if periodos_disponibles:
-            disponibles = ", ".join(periodos_disponibles)
-            detalle = f" Períodos detectados en el archivo: {disponibles}."
-        else:
-            detalle = " No se detectaron fechas válidas en BIOMETRICO."
+        disponibles = ", ".join(periodos_disponibles)
+        detalle = (
+            f" Períodos detectados en el archivo: {disponibles}."
+            if disponibles
+            else " No se detectaron fechas válidas en BIOMETRICO."
+        )
+        super().__init__(f"No se encontraron marcaciones para {periodo}.{detalle}")
+
+
+class PeriodoOrigenRequeridoError(ValueError):
+    def __init__(self, periodo, periodos_disponibles, anios_origen):
+        self.periodo = periodo
+        self.periodos_disponibles = periodos_disponibles
+        self.anios_origen = tuple(anios_origen)
+        periodos = ", ".join(periodos_disponibles)
+        anios = ", ".join(str(anio) for anio in anios_origen)
         super().__init__(
-            f"No se encontraron marcaciones para el período {periodo}.{detalle}"
+            f"No hay fechas para {periodo}. Períodos detectados: {periodos}. "
+            f"Confirma cuál año de origen del mismo mes se debe reasignar: {anios}."
         )
 
 
@@ -47,6 +57,8 @@ def hora(valor):
         return (datetime.min + timedelta(seconds=segundos)).time()
     if isinstance(valor, str):
         texto = valor.strip()
+        if not texto:
+            return None
         try:
             return datetime.fromisoformat(texto).time()
         except ValueError:
@@ -60,35 +72,31 @@ def hora(valor):
 
 
 def fecha(valor):
-    def corregir_anio(fecha_valor):
-        if fecha_valor.year == ANIO_FUENTE_ERRONEO:
-            return fecha_valor.replace(year=ANIO_CORRECTO)
-        return fecha_valor
-
+    """Interpreta la fecha almacenada sin reasignar su año."""
     if isinstance(valor, datetime):
-        return corregir_anio(valor.date())
+        return valor.date()
     if isinstance(valor, date):
-        return corregir_anio(valor)
+        return valor
     if isinstance(valor, (int, float)) and not isinstance(valor, bool):
         try:
             convertida = from_excel(valor)
             if isinstance(convertida, datetime):
-                return corregir_anio(convertida.date())
+                return convertida.date()
             if isinstance(convertida, date):
-                return corregir_anio(convertida)
+                return convertida
         except (OverflowError, TypeError, ValueError):
             return None
     if isinstance(valor, str):
         texto = valor.strip()
-        try:
-            return corregir_anio(datetime.fromisoformat(texto).date())
-        except ValueError:
-            pass
-        for formato in ("%d/%m/%Y", "%d-%m-%Y", "%Y-%m-%d", "%m/%d/%Y"):
+        for formato in ("%Y-%m-%d", "%d/%m/%Y", "%d-%m-%Y", "%m/%d/%Y"):
             try:
-                return corregir_anio(datetime.strptime(texto, formato).date())
+                return datetime.strptime(texto, formato).date()
             except ValueError:
                 continue
+        try:
+            return datetime.fromisoformat(texto).date()
+        except ValueError:
+            return None
     return None
 
 
@@ -129,10 +137,120 @@ def _texto_cedula(valor):
         return ""
     if isinstance(valor, float) and valor.is_integer():
         return str(int(valor))
+    if isinstance(valor, int):
+        return str(valor)
     return str(valor).strip()
 
 
-def cargar(ruta, periodo):
+def _vacio(valor):
+    return valor is None or (isinstance(valor, str) and not valor.strip())
+
+
+def _fecha_objetivo(fecha_origen, anio_objetivo):
+    try:
+        return fecha_origen.replace(year=anio_objetivo)
+    except ValueError as error:
+        raise ValueError(
+            f"La fecha {fecha_origen:%d/%m/%Y} no existe en {anio_objetivo}; "
+            "no se modificó el día ni el mes."
+        ) from error
+
+
+def _leer_feriados(hoja, fila_encabezado, indice_feriados, mes, anio_objetivo):
+    feriados = set()
+    if indice_feriados is None:
+        return feriados
+    for (valor,) in hoja.iter_rows(
+        min_row=fila_encabezado + 1,
+        min_col=indice_feriados + 1,
+        max_col=indice_feriados + 1,
+        values_only=True,
+    ):
+        candidatos = []
+        if isinstance(valor, (datetime, date)):
+            candidatos.append(valor.date() if isinstance(valor, datetime) else valor)
+        elif isinstance(valor, (int, float)) and not isinstance(valor, bool):
+            if float(valor).is_integer() and 1 <= int(valor) <= 31:
+                try:
+                    feriados.add(date(anio_objetivo, mes, int(valor)))
+                except ValueError:
+                    pass
+                continue
+            try:
+                convertido = from_excel(valor)
+                if isinstance(convertido, datetime):
+                    candidatos.append(convertido.date())
+                elif isinstance(convertido, date):
+                    candidatos.append(convertido)
+            except (OverflowError, TypeError, ValueError):
+                pass
+        elif isinstance(valor, str) and valor.strip():
+            texto = valor.strip()
+            for formato in ("%Y-%m-%d", "%d/%m/%Y", "%d-%m-%Y", "%m/%d/%Y"):
+                try:
+                    candidatos.append(datetime.strptime(texto, formato).date())
+                    break
+                except ValueError:
+                    continue
+            if not candidatos:
+                sin_anio = re.fullmatch(r"(\d{1,2})[/-](\d{1,2})", texto)
+                if sin_anio:
+                    primero, segundo = map(int, sin_anio.groups())
+                    dia_feriado = (
+                        segundo if primero == mes else primero if segundo == mes else None
+                    )
+                    if dia_feriado is not None:
+                        try:
+                            feriados.add(date(anio_objetivo, mes, dia_feriado))
+                        except ValueError:
+                            pass
+                        continue
+                trozos = re.split(r"[,;\s]+", texto)
+                if all(trozo.isdigit() for trozo in trozos if trozo):
+                    for trozo in trozos:
+                        if trozo and 1 <= int(trozo) <= 31:
+                            try:
+                                feriados.add(date(anio_objetivo, mes, int(trozo)))
+                            except ValueError:
+                                pass
+        for feriado in candidatos:
+            if feriado.month == mes and feriado.year == anio_objetivo:
+                feriados.add(feriado)
+            elif feriado.month == mes and feriado.year not in (anio_objetivo,):
+                # Solo se corrige el año biométrico; el feriado conserva su año original.
+                continue
+    return feriados
+
+
+def _seleccionar_anio_origen(mes, anio, periodos, anio_origen_confirmado):
+    if (anio, mes) in periodos:
+        return anio
+    anios_mismo_mes = sorted(y for y, m in periodos if m == mes)
+    disponibles = [f"{m:02d}/{y}" for y, m in sorted(periodos)]
+    if not anios_mismo_mes:
+        raise PeriodoSinRegistrosError(f"{mes:02d}/{anio}", disponibles)
+
+    if anio_origen_confirmado in anios_mismo_mes:
+        return anio_origen_confirmado
+    if anio_origen_confirmado is not None:
+        raise PeriodoOrigenRequeridoError(
+            f"{mes:02d}/{anio}", disponibles, anios_mismo_mes
+        )
+    # Equivalencia conocida para el libro de referencia: 2030 -> 2026.
+    anio_equivalente = next(
+        (
+            origen
+            for origen, destino in EQUIVALENCIAS_ANIO_BIOMETRICO.items()
+            if destino == anio and origen in anios_mismo_mes
+        ),
+        None,
+    )
+    if anio_equivalente is not None:
+        return anio_equivalente
+    raise PeriodoOrigenRequeridoError(f"{mes:02d}/{anio}", disponibles, anios_mismo_mes)
+
+
+def cargar(ruta, periodo, anio_origen_confirmado=None):
     mes, anio = _periodo(periodo)
     libro = load_workbook(ruta, read_only=True, data_only=True)
     try:
@@ -151,254 +269,290 @@ def cargar(ruta, periodo):
                 "7. Fecha",
                 "8. Marc/Ent",
                 "9. Marc/Sal",
+                "9. Observaciones",
+                "10. Justificacion",
             ],
         )
         fila_h, indices_h = _localizar_encabezados(
-            horarios, ["Docente", "Dia", "Hora de entrada", "Hora de salida"]
+            horarios,
+            ["Docente", "Dia", "Hora de entrada", "Hora de salida", "Feriados"],
         )
         indice = lambda indices, nombre: indices[clave(nombre)]
 
+        indice_cedula_h = next(
+            (
+                indices_h[clave(alias)]
+                for alias in (
+                    "Cedula",
+                    "Cédula",
+                    "Numero de cedula",
+                    "Número de cédula",
+                    "Nro de cedula",
+                )
+                if clave(alias) in indices_h
+            ),
+            None,
+        )
+        indice_feriados = indices_h[clave("Feriados")]
+        feriados = _leer_feriados(horarios, fila_h, indice_feriados, mes, anio)
+
         horarios_por_persona = defaultdict(lambda: defaultdict(set))
         nombres_horario = {}
-        cedulas_horario = {}
-        indice_cedula_h = indices_h.get(clave("Cedula"), indices_h.get(clave("Cédula")))
         for fila in horarios.iter_rows(min_row=fila_h + 1, values_only=True):
             nombre = fila[indice(indices_h, "Docente")]
             dia = fila[indice(indices_h, "Dia")]
-            if not nombre or not dia:
-                continue
+            cedula = (
+                _texto_cedula(fila[indice_cedula_h])
+                if indice_cedula_h is not None
+                else ""
+            )
             persona = clave(nombre)
-            cedula = _texto_cedula(fila[indice_cedula_h]) if indice_cedula_h is not None else ""
+            dia_normalizado = _dia_semana(dia)
+            if not persona and not cedula or not dia_normalizado:
+                continue
             identidad = (persona, cedula)
             entrada = hora(fila[indice(indices_h, "Hora de entrada")])
             salida = hora(fila[indice(indices_h, "Hora de salida")])
-            horarios_por_persona[identidad][_dia_semana(dia)].add((entrada, salida))
-            nombres_horario.setdefault(identidad, str(nombre).strip())
-            cedulas_horario[identidad] = cedula
+            horarios_por_persona[identidad][dia_normalizado].add((entrada, salida))
+            nombres_horario.setdefault(
+                identidad, str(nombre).strip() if nombre else "(Nombre no identificado)"
+            )
 
-        personas_por_nombre = defaultdict(set)
-        personas_periodo_por_nombre = defaultdict(set)
-        biomarcaciones = defaultdict(list)
+        filas_biometricas = []
         periodos_detectados = set()
-        biometrico_sin_horario = []
+        bio_identidades_por_nombre = defaultdict(set)
+        identidades_biometricas = set()
         for numero, fila in enumerate(
-            biometrico.iter_rows(min_row=fila_b + 1, values_only=True),
-            fila_b + 1,
+            biometrico.iter_rows(min_row=fila_b + 1, values_only=True), fila_b + 1
         ):
             valor_fecha = fila[indice(indices_b, "7. Fecha")]
-            nombre = fila[indice(indices_b, "3. Apellidos y nombres")]
+            valor_nombre = fila[indice(indices_b, "3. Apellidos y nombres")]
             valor_cedula = fila[indice(indices_b, "4. Cedula")]
             valor_entrada = fila[indice(indices_b, "8. Marc/Ent")]
             valor_salida = fila[indice(indices_b, "9. Marc/Sal")]
-            valores_relevantes = (
-                valor_fecha,
-                nombre,
-                valor_cedula,
-                valor_entrada,
-                valor_salida,
-            )
-            if not any(
-                valor is not None
-                and (not isinstance(valor, str) or valor.strip())
-                for valor in valores_relevantes
+            valor_observacion = fila[indice(indices_b, "9. Observaciones")]
+            valor_justificacion = fila[indice(indices_b, "10. Justificacion")]
+            if all(
+                _vacio(valor)
+                for valor in (
+                    valor_fecha,
+                    valor_nombre,
+                    valor_cedula,
+                    valor_entrada,
+                    valor_salida,
+                    valor_observacion,
+                    valor_justificacion,
+                )
             ):
                 continue
-            cedula = _texto_cedula(valor_cedula)
-            fecha_marcacion = fecha(valor_fecha)
-            if fecha_marcacion is None:
+            fecha_origen = fecha(valor_fecha)
+            if fecha_origen is None:
                 raise ValueError(
                     f"No se pudo interpretar la fecha en BIOMETRICO, fila {numero}"
                 )
-            periodos_detectados.add((fecha_marcacion.year, fecha_marcacion.month))
-            nombre_texto = str(nombre).strip() if nombre else ""
-            persona = clave(nombre_texto)
-            if persona:
-                personas_por_nombre[persona].add(cedula)
-            if (fecha_marcacion.year, fecha_marcacion.month) != (anio, mes):
-                continue
-            if not persona:
-                biometrico_sin_horario.append(
-                    (cedula, fecha_marcacion, numero, valor_entrada, valor_salida)
-                )
-                continue
-            personas_periodo_por_nombre[persona].add(cedula)
-            biomarcaciones[(persona, cedula, fecha_marcacion)].append(
-                (numero, nombre_texto, valor_entrada, valor_salida)
+            periodos_detectados.add((fecha_origen.year, fecha_origen.month))
+            nombre_texto = str(valor_nombre).strip() if valor_nombre else ""
+            nombre_clave = clave(nombre_texto)
+            cedula = _texto_cedula(valor_cedula)
+            identidad_bio = ("cedula", cedula) if cedula else ("nombre", nombre_clave)
+            if identidad_bio[1]:
+                identidades_biometricas.add(identidad_bio)
+                if nombre_clave:
+                    bio_identidades_por_nombre[nombre_clave].add(identidad_bio)
+            filas_biometricas.append(
+                {
+                    "fila": numero,
+                    "fecha_origen": fecha_origen,
+                    "nombre": nombre_texto,
+                    "nombre_clave": nombre_clave,
+                    "cedula": cedula,
+                    "identidad": identidad_bio,
+                    "entrada": valor_entrada,
+                    "salida": valor_salida,
+                    "observacion": str(valor_observacion).strip()
+                    if valor_observacion
+                    else "",
+                    "justificacion": str(valor_justificacion).strip()
+                    if valor_justificacion
+                    else "",
+                }
             )
 
-        periodo_disponible = (anio, mes)
-        if periodo_disponible not in periodos_detectados:
-            disponibles = [
-                f"{mes_detectado:02d}/{anio_detectado}"
-                for anio_detectado, mes_detectado in sorted(periodos_detectados)
-            ]
-            raise PeriodoSinRegistrosError(periodo, disponibles)
+        anio_origen = _seleccionar_anio_origen(
+            mes, anio, periodos_detectados, anio_origen_confirmado
+        )
+        biomarcaciones = defaultdict(list)
+        identidades_periodo = set()
+        for fila in filas_biometricas:
+            fecha_origen = fila["fecha_origen"]
+            if (fecha_origen.year, fecha_origen.month) != (anio_origen, mes):
+                continue
+            fecha_objetivo = _fecha_objetivo(fecha_origen, anio)
+            fila["fecha"] = fecha_objetivo
+            identidades_periodo.add(fila["identidad"])
+            biomarcaciones[(fila["identidad"], fecha_objetivo)].append(fila)
 
         jornadas = []
+        ancla_periodo = date(anio, mes, 1)
         for identidad_horario, dias in horarios_por_persona.items():
-            persona, cedula_horario = identidad_horario
-            identidades = set()
-            if cedula_horario:
-                identidades.add((persona, cedula_horario))
-            else:
-                cedulas = personas_periodo_por_nombre.get(persona) or personas_por_nombre.get(persona) or {""}
-                # Un nombre ambiguo sin cédula en HORARIOS no permite asignar jornadas con seguridad.
-                if len(cedulas) > 1:
-                    identidades.update((persona, c) for c in cedulas)
-                else:
-                    identidades.add((persona, next(iter(cedulas))))
+            nombre_clave, cedula_horario = identidad_horario
             nombre = nombres_horario[identidad_horario]
+            if cedula_horario:
+                candidatos = {("cedula", cedula_horario)} & identidades_biometricas
+            else:
+                candidatos = bio_identidades_por_nombre.get(nombre_clave, set())
+
+            if len(candidatos) != 1:
+                if not candidatos:
+                    texto_revision = (
+                        "No se encontró una coincidencia para este docente en BIOMETRICO"
+                    )
+                else:
+                    texto_revision = (
+                        "La identidad no es inequívoca en BIOMETRICO; confirmar docente"
+                    )
+                jornadas.append(
+                    Jornada(
+                        cedula_horario,
+                        nombre,
+                        ancla_periodo,
+                        None,
+                        None,
+                        None,
+                        None,
+                        texto_revision,
+                        registro_biometrico=False,
+                        revision_sin_fecha=True,
+                    )
+                )
+                continue
+
+            identidad_bio = next(iter(candidatos))
+            cedula_salida = (
+                cedula_horario
+                or (identidad_bio[1] if identidad_bio[0] == "cedula" else "")
+            )
             for dia_numero in range(1, calendar.monthrange(anio, mes)[1] + 1):
                 fecha_dia = date(anio, mes, dia_numero)
+                if fecha_dia in feriados:
+                    continue
                 dia_nombre = _dia_semana(fecha_dia.strftime("%A"))
                 if dia_nombre not in dias:
                     continue
                 horarios_dia = dias[dia_nombre]
-                for _, cedula in identidades:
-                    clave_persona = (persona, cedula, fecha_dia)
-                    registros = biomarcaciones.pop(clave_persona, [])
-                    if not registros:
-                        candidatos = [
-                            llave for llave in biomarcaciones
-                            if llave[2] == fecha_dia
-                            and (
-                                (cedula and llave[1] and cedula == llave[1])
-                                or (persona == llave[0] and (not cedula or not llave[1]))
-                            )
-                        ]
-                        # Solo se usa el nombre como respaldo si identifica una única fila.
-                        if len(candidatos) == 1:
-                            registros = biomarcaciones.pop(candidatos[0])
-                    observaciones = []
-                    duplicada = len(registros) > 1
-                    if duplicada:
-                        observaciones.append(
-                            f"Hay {len(registros)} filas biométricas para la misma persona y fecha; revisar sin sumar tiempos"
-                        )
-                    if len(horarios_dia) != 1:
-                        entrada_programada = salida_programada = None
-                        observaciones.append(
-                            "Horario ambiguo para este día; revisar HORARIOS AE"
-                        )
-                    else:
-                        entrada_programada, salida_programada = next(iter(horarios_dia))
-                        if not entrada_programada or not salida_programada:
-                            observaciones.append(
-                                "No existe un horario válido para este día; revisar HORARIOS AE"
-                            )
-
-                    entrada_real = salida_real = None
-                    entrada_invalida = salida_invalida = False
-                    if len(registros) == 1:
-                        _, _, valor_entrada, valor_salida = registros[0]
-                        entrada_real = hora(valor_entrada)
-                        salida_real = hora(valor_salida)
-                        entrada_invalida = valor_entrada not in (None, "") and entrada_real is None
-                        salida_invalida = valor_salida not in (None, "") and salida_real is None
-                        if entrada_invalida:
-                            observaciones.append("Marcación de entrada inválida; revisar")
-                        if salida_invalida:
-                            observaciones.append("Marcación de salida inválida; revisar")
-                    if len(identidades) > 1:
-                        observaciones.append(
-                            "El nombre normalizado aparece asociado a varias cédulas; verificar identidad"
-                        )
+                if len(horarios_dia) != 1:
                     jornadas.append(
                         Jornada(
-                            cedula,
+                            cedula_salida,
+                            nombre,
+                            fecha_dia,
+                            None,
+                            None,
+                            None,
+                            None,
+                            "Horario ambiguo para este día; revisar HORARIOS AE",
+                            registro_biometrico=False,
+                        )
+                    )
+                    continue
+                entrada_programada, salida_programada = next(iter(horarios_dia))
+                if entrada_programada is None and salida_programada is None:
+                    continue
+                if entrada_programada is None or salida_programada is None:
+                    jornadas.append(
+                        Jornada(
+                            cedula_salida,
                             nombre,
                             fecha_dia,
                             entrada_programada,
                             salida_programada,
-                            None if duplicada else entrada_real,
-                            None if duplicada else salida_real,
-                            "; ".join(observaciones),
-                            entrada_invalida,
-                            salida_invalida,
-                            duplicada,
+                            None,
+                            None,
+                            "Horario incompleto; revisar HORARIOS AE",
+                            registro_biometrico=False,
                         )
                     )
+                    continue
 
-        for (persona, cedula, fecha_dia), registros in biomarcaciones.items():
-            nombre = registros[0][1]
-            observaciones = [
-                "No existe un horario válido para este día; revisar HORARIOS AE"
-            ]
-            duplicada = len(registros) > 1
-            entrada_real = salida_real = None
-            entrada_invalida = salida_invalida = False
-            if duplicada:
-                observaciones.append(
-                    f"Hay {len(registros)} filas biométricas para la misma persona y fecha; revisar sin sumar tiempos"
-                )
-            else:
-                _, _, valor_entrada, valor_salida = registros[0]
-                entrada_real = hora(valor_entrada)
-                salida_real = hora(valor_salida)
-                entrada_invalida = valor_entrada not in (None, "") and entrada_real is None
-                salida_invalida = valor_salida not in (None, "") and salida_real is None
-                if entrada_invalida:
-                    observaciones.append("Marcación de entrada inválida; revisar")
-                if salida_invalida:
-                    observaciones.append("Marcación de salida inválida; revisar")
-            jornadas.append(
-                Jornada(
-                    cedula,
-                    nombre,
-                    fecha_dia,
-                    None,
-                    None,
-                    None if duplicada else entrada_real,
-                    None if duplicada else salida_real,
-                    "; ".join(observaciones),
-                    entrada_invalida,
-                    salida_invalida,
-                    duplicada,
-                )
-            )
+                registros = biomarcaciones.get((identidad_bio, fecha_dia), [])
+                if not registros:
+                    jornadas.append(
+                        Jornada(
+                            cedula_salida,
+                            nombre,
+                            fecha_dia,
+                            entrada_programada,
+                            salida_programada,
+                            None,
+                            None,
+                            "Sin registro en BIOMETRICO",
+                            registro_biometrico=False,
+                        )
+                    )
+                    continue
 
-        sin_nombre = defaultdict(list)
-        for registro in biometrico_sin_horario:
-            cedula, fecha_dia, _, _, _ = registro
-            sin_nombre[(cedula, fecha_dia)].append(registro)
-        for (cedula, fecha_dia), registros in sin_nombre.items():
-            duplicada = len(registros) > 1
-            observaciones = [
-                f"Fila biométrica {registro[2]} sin nombre; revisar"
-                for registro in registros
-            ]
-            entrada_real = salida_real = None
-            entrada_invalida = salida_invalida = False
-            if duplicada:
-                observaciones.append(
-                    f"Hay {len(registros)} filas biométricas con la misma cédula y fecha; revisar sin sumar tiempos"
+                notas = sorted(
+                    {
+                        fila["observacion"]
+                        for fila in registros
+                        if fila["observacion"]
+                    }
                 )
-            else:
-                _, _, _, valor_entrada, valor_salida = registros[0]
-                entrada_real = hora(valor_entrada)
-                salida_real = hora(valor_salida)
-                entrada_invalida = valor_entrada not in (None, "") and entrada_real is None
-                salida_invalida = valor_salida not in (None, "") and salida_real is None
-                if entrada_invalida:
-                    observaciones.append("Marcación de entrada inválida; revisar")
-                if salida_invalida:
-                    observaciones.append("Marcación de salida inválida; revisar")
-            jornadas.append(
-                Jornada(
-                    cedula,
-                    "(Nombre no identificado)",
-                    fecha_dia,
-                    None,
-                    None,
-                    None if duplicada else entrada_real,
-                    None if duplicada else salida_real,
-                    "; ".join(observaciones),
-                    entrada_invalida,
-                    salida_invalida,
-                    duplicada,
+                justificaciones = sorted(
+                    {
+                        fila["justificacion"]
+                        for fila in registros
+                        if fila["justificacion"]
+                    }
                 )
-            )
+                obs = []
+                duplicada = len(registros) > 1
+                entrada_real = salida_real = None
+                entrada_invalida = salida_invalida = False
+                if duplicada:
+                    obs.append(
+                        f"Hay {len(registros)} filas biométricas para esta fecha; revisar"
+                    )
+                else:
+                    registro = registros[0]
+                    entrada_real = hora(registro["entrada"])
+                    salida_real = hora(registro["salida"])
+                    entrada_invalida = (
+                        not _vacio(registro["entrada"]) and entrada_real is None
+                    )
+                    salida_invalida = (
+                        not _vacio(registro["salida"]) and salida_real is None
+                    )
+                    if entrada_invalida:
+                        obs.append("Timbre de entrada inválido; revisar")
+                    if salida_invalida:
+                        obs.append("Timbre de salida inválido; revisar")
+                jornadas.append(
+                    Jornada(
+                        cedula_salida,
+                        nombre,
+                        fecha_dia,
+                        entrada_programada,
+                        salida_programada,
+                        None if duplicada else entrada_real,
+                        None if duplicada else salida_real,
+                        "; ".join(obs),
+                        entrada_invalida,
+                        salida_invalida,
+                        duplicada,
+                        True,
+                        " | ".join(notas),
+                        " | ".join(justificaciones),
+                    )
+                )
 
-        return sorted(jornadas, key=lambda jornada: (jornada.nombre, jornada.fecha, jornada.cedula))
+        return sorted(
+            jornadas,
+            key=lambda jornada: (
+                clave(jornada.nombre),
+                jornada.fecha,
+                jornada.cedula,
+            ),
+        )
     finally:
         libro.close()

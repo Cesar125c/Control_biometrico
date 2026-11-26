@@ -8,8 +8,9 @@ _COLUMNAS = {
     "Marcaciones": [
         ("Cédula", "cedula"),
         ("Nombre", "nombre"),
-        ("Total días con novedades", "dias_con_novedades"),
-        ("Observaciones", "observaciones"),
+        ("Días con timbres faltantes", "dias_con_timbres_faltantes"),
+        ("Detalle de timbres faltantes", "detalle_timbres_faltantes"),
+        ("Casos para revisión", "casos_revision"),
     ],
     "Atrasos": [
         ("Cédula", "cedula"),
@@ -32,7 +33,7 @@ _COLUMNAS = {
 }
 
 _ANCHOS = {
-    "Marcaciones": (18, 36, 24, 90),
+    "Marcaciones": (18, 36, 26, 72, 90),
     "Atrasos": (18, 36, 24, 90),
     "Salidas anticipadas": (18, 36, 24, 90),
     "Horas extra": (18, 36, 48, 90),
@@ -65,7 +66,7 @@ def exportar(path, periodo, filas_por_hoja):
             valores = []
             for encabezado, clave in columnas:
                 valor = fila[clave]
-                if clave == "observaciones":
+                if clave in ("observaciones", "detalle_timbres_faltantes", "casos_revision"):
                     valor = "\n".join(valor)
                 elif clave == "total_minutos":
                     valor = valor / 1440

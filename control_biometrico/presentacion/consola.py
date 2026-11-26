@@ -2,8 +2,11 @@ from pathlib import Path
 import tkinter as tk
 from tkinter import filedialog
 
-from control_biometrico.infraestructura.lector_excel import cargar
-from control_biometrico.infraestructura.lector_excel import PeriodoSinRegistrosError
+from control_biometrico.infraestructura.lector_excel import (
+    PeriodoOrigenRequeridoError,
+    PeriodoSinRegistrosError,
+    cargar,
+)
 from control_biometrico.aplicacion.servicio import generar
 from control_biometrico.infraestructura.reporte import exportar
 
@@ -34,7 +37,17 @@ def ejecutar():
             f"reporte_{periodo.replace('/', '_')}.xlsx"
         )
 
-        jornadas = cargar(ruta_excel, periodo)
+        try:
+            jornadas = cargar(ruta_excel, periodo)
+        except PeriodoOrigenRequeridoError as error:
+            print(error)
+            anio_origen = input(
+                "Año de origen que confirmas para reasignar (Enter cancela): "
+            ).strip()
+            if not anio_origen:
+                print("No se reasignaron fechas; operación cancelada.")
+                return
+            jornadas = cargar(ruta_excel, periodo, int(anio_origen))
         filas = generar(jornadas)
         exportar(ruta_salida, periodo, filas)
 

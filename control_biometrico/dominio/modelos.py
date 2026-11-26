@@ -15,3 +15,7 @@ class Jornada:
     entrada_invalida: bool = False
     salida_invalida: bool = False
     duplicada: bool = False
+    registro_biometrico: bool = True
+    observacion_biometrica: str = ""
+    justificacion_biometrica: str = ""
+    revision_sin_fecha: bool = False
