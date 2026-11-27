@@ -27,7 +27,7 @@ _COLUMNAS = {
     "Horas extra": [
         ("Cédula", "cedula"),
         ("Nombre", "nombre"),
-        ("Tiempo posterior al horario pendiente de validación", "total_minutos"),
+        ("Tiempo acumulado", "total_minutos"),
         ("Observaciones", "observaciones"),
     ],
 }
@@ -95,5 +95,5 @@ def exportar(path, periodo, filas_por_hoja):
         hoja.sheet_view.showGridLines = False
 
     libro.properties.title = f"Control biométrico {periodo}"
-    libro.properties.subject = "Marcaciones, novedades y tiempos por validar"
+    libro.properties.subject = "Marcaciones y novedades del período"
     libro.save(path)

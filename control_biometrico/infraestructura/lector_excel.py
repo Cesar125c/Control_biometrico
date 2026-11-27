@@ -5,6 +5,7 @@ from collections import defaultdict
 from datetime import date, datetime, time, timedelta
 
 from openpyxl import load_workbook
+from openpyxl.utils import get_column_letter
 from openpyxl.utils.datetime import from_excel
 
 from control_biometrico.dominio.modelos import Jornada
@@ -296,9 +297,12 @@ def cargar(ruta, periodo, anio_origen_confirmado=None):
         indice_feriados = indices_h[clave("Feriados")]
         feriados = _leer_feriados(horarios, fila_h, indice_feriados, mes, anio)
 
-        horarios_por_persona = defaultdict(lambda: defaultdict(set))
+        horarios_por_persona = defaultdict(lambda: defaultdict(dict))
         nombres_horario = {}
-        for fila in horarios.iter_rows(min_row=fila_h + 1, values_only=True):
+        columna_salida = indice(indices_h, "Hora de salida")
+        for numero, fila in enumerate(
+            horarios.iter_rows(min_row=fila_h + 1, values_only=True), fila_h + 1
+        ):
             nombre = fila[indice(indices_h, "Docente")]
             dia = fila[indice(indices_h, "Dia")]
             cedula = (
@@ -312,8 +316,10 @@ def cargar(ruta, periodo, anio_origen_confirmado=None):
                 continue
             identidad = (persona, cedula)
             entrada = hora(fila[indice(indices_h, "Hora de entrada")])
-            salida = hora(fila[indice(indices_h, "Hora de salida")])
-            horarios_por_persona[identidad][dia_normalizado].add((entrada, salida))
+            salida = hora(fila[columna_salida])
+            horarios_por_persona[identidad][dia_normalizado].setdefault(
+                (entrada, salida), numero
+            )
             nombres_horario.setdefault(
                 identidad, str(nombre).strip() if nombre else "(Nombre no identificado)"
             )
@@ -455,10 +461,12 @@ def cargar(ruta, periodo, anio_origen_confirmado=None):
                         )
                     )
                     continue
-                entrada_programada, salida_programada = next(iter(horarios_dia))
+                (entrada_programada, salida_programada), fila_horario = next(
+                    iter(horarios_dia.items())
+                )
                 if entrada_programada is None and salida_programada is None:
                     continue
-                if entrada_programada is None or salida_programada is None:
+                if entrada_programada is None:
                     jornadas.append(
                         Jornada(
                             cedula_salida,
@@ -474,6 +482,13 @@ def cargar(ruta, periodo, anio_origen_confirmado=None):
                     )
                     continue
 
+                obs = []
+                if salida_programada is None:
+                    celda = f"{get_column_letter(columna_salida + 1)}{fila_horario}"
+                    obs.append(
+                        f"Sin hora de salida programada válida en {horarios.title}!{celda}. "
+                        "Revisa el horario. No se calculó salida anticipada ni horas extra."
+                    )
                 registros = biomarcaciones.get((identidad_bio, fecha_dia), [])
                 if not registros:
                     jornadas.append(
@@ -485,7 +500,7 @@ def cargar(ruta, periodo, anio_origen_confirmado=None):
                             salida_programada,
                             None,
                             None,
-                            "Sin registro en BIOMETRICO",
+                            "; ".join([*obs, "Sin registro en BIOMETRICO"]),
                             registro_biometrico=False,
                         )
                     )
@@ -505,7 +520,6 @@ def cargar(ruta, periodo, anio_origen_confirmado=None):
                         if fila["justificacion"]
                     }
                 )
-                obs = []
                 duplicada = len(registros) > 1
                 entrada_real = salida_real = None
                 entrada_invalida = salida_invalida = False
@@ -527,6 +541,18 @@ def cargar(ruta, periodo, anio_origen_confirmado=None):
                         obs.append("Timbre de entrada inválido; revisar")
                     if salida_invalida:
                         obs.append("Timbre de salida inválido; revisar")
+                    if (
+                        entrada_real is not None
+                        and salida_real is not None
+                        and salida_real < entrada_real
+                    ):
+                        salida_invalida = True
+                        obs.append(
+                            f"Entrada {entrada_real:%H:%M:%S} y salida {salida_real:%H:%M:%S} "
+                            f"en {biometrico.title}, fila {registro['fila']}. "
+                            "La salida figura antes de la entrada. Confirma su fecha real. "
+                            "No se calculó salida anticipada ni horas extra."
+                        )
                 jornadas.append(
                     Jornada(
                         cedula_salida,

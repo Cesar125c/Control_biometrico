@@ -7,9 +7,12 @@ from control_biometrico.analisis import (
 from control_biometrico.dominio.nombres import clave
 
 
-def generar(jornadas):
+def generar(jornadas, fechas_excluidas=frozenset(), salidas_excepcionales=None):
+    salidas_excepcionales = salidas_excepcionales or {}
     agrupado = {}
     for jornada in jornadas:
+        if jornada.fecha in fechas_excluidas and not jornada.revision_sin_fecha:
+            continue
         identidad = (
             ("cedula", jornada.cedula)
             if jornada.cedula
@@ -64,16 +67,25 @@ def generar(jornadas):
             fila["atrasos"].append(f"{dia}: {minutos} min de atraso")
             fila["atrasos_minutos"] += minutos
 
-        minutos = salidas_anticipadas.analizar(jornada)
+        salida_excepcional = salidas_excepcionales.get(jornada.fecha)
+        if salida_excepcional is not None and (
+            jornada.salida_programada is None
+            or salida_excepcional >= jornada.salida_programada
+        ):
+            salida_excepcional = None
+        minutos = salidas_anticipadas.analizar(jornada, salida_excepcional)
         if minutos:
             fila["salidas"].append(f"{dia}: {minutos} min de salida anticipada")
             fila["salidas_minutos"] += minutos
 
-        minutos = horas_extra.analizar(jornada)
+        minutos = horas_extra.analizar(jornada, salida_excepcional)
         if minutos:
-            fila["horas_extra"].append(
-                f"{dia}: {minutos} min posteriores al horario; pendiente de validación"
+            detalle = (
+                f"{minutos} min de horas extra"
+                if salida_excepcional is not None
+                else f"{minutos} min posteriores al horario; pendiente de validación"
             )
+            fila["horas_extra"].append(f"{dia}: {detalle}")
             fila["horas_extra_minutos"] += minutos
 
     filas = list(agrupado.values())
